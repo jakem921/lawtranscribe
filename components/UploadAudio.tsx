@@ -6,10 +6,36 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardHeader, CardTitle, CardContent, CardDescription } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast"
-import { FFmpeg } from '@ffmpeg/ffmpeg';
-import { fetchFile } from '@ffmpeg/util';
+import dynamic from 'next/dynamic';
 
-const ffmpeg = new FFmpeg();
+let ffmpeg: any = null;
+
+const initFFmpeg = async () => {
+  if (typeof window === 'undefined') {
+    console.log('Skipping FFmpeg initialization on server side');
+    return null;
+  }
+  
+  try {
+    if (!ffmpeg) {
+      const { FFmpeg } = await import('@ffmpeg/ffmpeg');
+      const { fetchFile } = await import('@ffmpeg/util');
+      ffmpeg = new FFmpeg();
+      await ffmpeg.load();
+      return { ffmpeg, fetchFile };
+    }
+    
+    if (!ffmpeg.loaded) {
+      await ffmpeg.load();
+    }
+    
+    const { fetchFile } = await import('@ffmpeg/util');
+    return { ffmpeg, fetchFile };
+  } catch (error) {
+    console.error('Error initializing FFmpeg:', error);
+    return null;
+  }
+};
 
 interface MonitoredFile {
   name: string;
@@ -70,49 +96,66 @@ const UploadAudio: React.FC<{ onUploadSuccess: () => void }> = ({ onUploadSucces
     }
   };
 
-  const loadFFmpeg = async () => {
-    if (!ffmpeg.loaded) {
-      await ffmpeg.load();
-    }
-  };
-
   const compressAudio = async () => {
     if (!selectedFile) return;
     setIsCompressing(true);
     try {
-      await loadFFmpeg();
-      await ffmpeg.writeFile('input_audio', await fetchFile(selectedFile));
+      const ffmpegInstance = await initFFmpeg();
+      if (!ffmpegInstance) {
+        throw new Error('FFmpeg failed to initialize');
+      }
+      const { ffmpeg, fetchFile } = ffmpegInstance;
+      
+      await ffmpeg.writeFile('input_file', await fetchFile(selectedFile));
 
-      // Set target bitrate to reduce file size
-      // Adjust parameters as needed
-      await ffmpeg.exec([
-        '-i',
-        'input_audio',
-        '-ar',
-        '16000',
-        '-ac',
-        '1',
-        '-b:a',
-        '16k',
-        'output_audio.mp3'
-      ]);
+      // Different processing for MP4 files
+      if (selectedFile.type === 'video/mp4') {
+        // Extract audio from MP4 and convert to MP3
+        await ffmpeg.exec([
+          '-i',
+          'input_file',
+          '-vn', // No video
+          '-acodec',
+          'libmp3lame',
+          '-ar',
+          '16000',
+          '-ac',
+          '1',
+          '-b:a',
+          '16k',
+          'output_audio.mp3'
+        ]);
+      } else {
+        // Regular audio processing
+        await ffmpeg.exec([
+          '-i',
+          'input_file',
+          '-ar',
+          '16000',
+          '-ac',
+          '1',
+          '-b:a',
+          '16k',
+          'output_audio.mp3'
+        ]);
+      }
 
       const data = await ffmpeg.readFile('output_audio.mp3');
       const compressedBlob = new Blob([data], { type: 'audio/mpeg' });
-      const compressed = new File([compressedBlob], `compressed_${selectedFile.name}`, {
+      const compressed = new File([compressedBlob], `compressed_${selectedFile.name.replace(/\.[^/.]+$/, '')}.mp3`, {
         type: 'audio/mpeg',
       });
 
       setCompressedFile(compressed);
       toast({
-        title: 'Compression Successful',
+        title: 'Processing Successful',
         description: `File size reduced to ${(compressed.size / (1024 * 1024)).toFixed(2)} MB`,
       });
     } catch (error) {
-      console.error('Compression error:', error);
+      console.error('Processing error:', error);
       toast({
-        title: 'Compression Failed',
-        description: 'An error occurred while compressing the audio.',
+        title: 'Processing Failed',
+        description: 'An error occurred while processing the file.',
         variant: 'destructive',
       });
     } finally {
@@ -130,20 +173,40 @@ const UploadAudio: React.FC<{ onUploadSuccess: () => void }> = ({ onUploadSucces
     formData.append('fullPath', fileToUpload.name);
 
     try {
-      await fetch('/api/transcribe', {
+      console.log('=== UPLOAD DETAILS ===');
+      console.log('File name:', fileToUpload.name);
+      console.log('File type:', fileToUpload.type);
+      console.log('File size:', fileToUpload.size, 'bytes');
+      console.log('Starting upload to /api/transcribe...');
+      
+      const response = await fetch('/api/transcribe', {
         method: 'POST',
         body: formData,
       });
+
+      console.log('=== API RESPONSE ===');
+      console.log('Status:', response.status);
+      console.log('Status Text:', response.statusText);
+      
+      const responseData = await response.json();
+      console.log('Response data:', responseData);
+
+      if (!response.ok) {
+        throw new Error(responseData.error || responseData.details || 'Failed to transcribe');
+      }
+
+      console.log('Transcription response:', responseData);
+
       toast({
         title: 'Transcription Started',
         description: 'Your audio is being transcribed.',
       });
       onUploadSuccess();
-    } catch (error) {
+    } catch (error: any) {
       console.error('Transcription error:', error);
       toast({
         title: 'Transcription Failed',
-        description: 'An error occurred while transcribing the audio.',
+        description: error.message || 'An error occurred while transcribing the audio.',
         variant: 'destructive',
       });
     } finally {
@@ -157,9 +220,14 @@ const UploadAudio: React.FC<{ onUploadSuccess: () => void }> = ({ onUploadSucces
     return file ? file.size / (1024 ** 2) : 0;
   };
 
-  const isCompressionNeeded = selectedFile && getFileSizeMB(selectedFile) > 24;
+  const isCompressionNeeded = selectedFile && (
+    getFileSizeMB(selectedFile) > 24 || 
+    selectedFile.type === 'video/mp4'
+  );
+
   const isTranscribeDisabled =
     (selectedFile && getFileSizeMB(selectedFile) > 24 && (!compressedFile || getFileSizeMB(compressedFile) > 24)) ||
+    (selectedFile?.type === 'video/mp4' && !compressedFile) ||
     isCompressing ||
     isTranscribing;
 
@@ -167,15 +235,15 @@ const UploadAudio: React.FC<{ onUploadSuccess: () => void }> = ({ onUploadSucces
     <Card>
       <CardHeader>
         <CardTitle>Upload New Audio</CardTitle>
-        <CardDescription>Select an audio file to transcribe</CardDescription>
+        <CardDescription>Select an audio or video file to transcribe</CardDescription>
       </CardHeader>
       <CardContent>
         <div className="flex flex-col gap-4">
-          <Label htmlFor="audio-file">Audio File</Label>
+          <Label htmlFor="audio-file">Audio/Video File</Label>
           <Input
             id="audio-file"
             type="file"
-            accept="audio/*"
+            accept="audio/*,video/mp4"
             onChange={handleFileChange}
           />
           {selectedFile && (
@@ -196,18 +264,20 @@ const UploadAudio: React.FC<{ onUploadSuccess: () => void }> = ({ onUploadSucces
           )}
           {isCompressionNeeded && (
             <Button onClick={compressAudio} disabled={isCompressing}>
-              {isCompressing ? 'Compressing...' : 'Compress Audio'}
+              {isCompressing ? 'Processing...' : selectedFile?.type === 'video/mp4' ? 'Extract Audio' : 'Compress Audio'}
             </Button>
           )}
           {compressedFile && (
-            <p>Compressed File: {compressedFile.name} ({getFileSizeMB(compressedFile).toFixed(2)} MB)</p>
+            <p>Processed File: {compressedFile.name} ({getFileSizeMB(compressedFile).toFixed(2)} MB)</p>
           )}
           <Button onClick={handleTranscribe} disabled={isTranscribeDisabled}>
             {isTranscribing ? 'Transcribing...' : 'Transcribe Audio'}
           </Button>
-          {isTranscribeDisabled && (
+          {isTranscribeDisabled && selectedFile && (
             <p className="text-red-500">
-              {selectedFile && getFileSizeMB(compressedFile || selectedFile) > 24
+              {selectedFile.type === 'video/mp4' && !compressedFile
+                ? 'Please extract the audio from the video file first.'
+                : getFileSizeMB(compressedFile || selectedFile) > 24
                 ? 'File size exceeds 24 MB, please compress the file before transcribing.'
                 : ''}
             </p>

@@ -3,6 +3,7 @@
 import React from "react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { LucideProps } from "lucide-react"
 
 interface CategoryItem {
   [key: string]: string
@@ -12,13 +13,17 @@ interface CategoryProps {
   title: string
   items: CategoryItem[]
   gridSpan?: string
+  icon?: React.ForwardRefExoticComponent<Omit<LucideProps, "ref"> & React.RefAttributes<SVGSVGElement>>
 }
 
-const CategoryCard: React.FC<CategoryProps> = ({ title, items, gridSpan }) => {
+const CategoryCard: React.FC<CategoryProps> = ({ title, items, gridSpan, icon: Icon }) => {
   return (
     <Card className={`h-full ${gridSpan}`}>
       <CardHeader>
-        <CardTitle>{title}</CardTitle>
+        <CardTitle className="flex items-center gap-2">
+          {Icon && <Icon className="w-5 h-5" />}
+          <span>{title}</span>
+        </CardTitle>
       </CardHeader>
       <CardContent>
         <ScrollArea className="h-[200px] pr-4">
